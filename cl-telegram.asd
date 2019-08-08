@@ -19,4 +19,5 @@
   :components
   ((:file "bot")
    (:file "bindings")
+   (:file "util")
    (:file "telegram")))
