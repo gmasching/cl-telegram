@@ -37,6 +37,19 @@
 (defun stop ()
   (setf *stop* t))
 
+(defparameter *update-queue* nil)
+(defun get-pending-updates ()
+  "Return the updates in the update queue as a list. The oldest updates 
+come first in the queue, and also first in the list."
+  (let ((update-objects nil))
+    (loop :named out :do
+       (multiple-value-bind (value existsp)
+	   (lparallel.queue:try-pop-queue *update-queue*)
+	 (if existsp
+	     (push value update-objects)
+	     (return-from out))))
+    (values (nreverse update-objects))))
+
 (defparameter *bot* nil)
 (defun start (&optional (token cl-telegram-bot::*token*))
   (setf *stop* nil)
@@ -44,7 +57,8 @@
 	(*async-updates-channel* (lparallel:make-channel))
 	(*ticker*
 	 ;;A ticker that ticks every 1 second. the second number does not correspond to seconds?
-	 (fps-independent-timestep:make-ticker 1 most-positive-fixnum 10)))
+	 (fps-independent-timestep:make-ticker 1 most-positive-fixnum 10))
+	(*update-queue* (lparallel.queue:make-queue)))
     ;;FIXME::this is here to empty lost time. Bug?
     (fps-independent-timestep::tick *ticker* ((what-time)))
 
@@ -52,13 +66,14 @@
     (lparallel:submit-task *async-updates-channel*
 			   (lambda () (make-task-return-type :initialize-dummy)))
     (loop
-       (iteration *bot* *async-updates-channel* *ticker*)
+       (designate-polling-and-handle-updates *bot* *async-updates-channel* *ticker*)
        (when *stop* (return)))))
-(defun iteration (&optional (bot *bot*) (channel *async-updates-channel*) (ticker *ticker*))
+(defun designate-polling-and-handle-updates
+    (&optional (bot *bot*) (channel *async-updates-channel*) (ticker *ticker*))
   (setf *current-time* (what-time))
   ;;Run 'one-process-iteration' at a fixed rate.
   (fps-independent-timestep::tick ticker (*current-time*)
-    (one-process-iteration bot))
+    (tick bot (get-pending-updates)))
   (multiple-value-bind (value existsp) (lparallel:try-receive-result channel)
     (when (and existsp value)
       (with-task-return-type (type value) value
@@ -66,7 +81,8 @@
 	  ;;A get-updates task finished. Handle the recieved tasks, and
 	  ;;start polling for the next round
 	  (:get-updates
-	   (handle-updates bot value)
+	   (dolist (update-object value) 
+	     (lparallel.queue:push-queue update-object *update-queue*))
 	   (submit-get-updates-task))
 	  ;;A dummy task is used to initialize the system.
 	  (:initialize-dummy
@@ -93,18 +109,18 @@
    raw-data
    user))
 (defmethod print-object ((update update) stream)
-  (write
-   (list
-    (update-user update)
-    (update-update_id update)
-    (update-type update)
-    (update-thing update))
-   :stream stream))
+  (format stream
+   "~%User:~a ~%Update ID:~a ~%Type:~a ~%Thing:~a"
+   (update-user update)
+   (update-update_id update)
+   (update-type update)
+   (update-thing update)))
 
 (defun create-update (update-data)
   (let ((type nil)
 	(thing nil))
     (block out
+      ;;A telegram update has one of these types.
       (dolist (item '("message"
 		      "edited_message"
 		      "channel_post"
@@ -127,6 +143,8 @@
 		   :thing thing
 		   :raw-data update-data
 		   :user user))))
+
+;;;Above is general code, below is test code
 
 (defparameter *testcase*
   #+nil
@@ -167,75 +185,67 @@
 		   (user-whitelisted-p (update-user update)))
 		   updates))
 
-(defparameter *output* *standard-output*)
 (defparameter *live-chats* nil)
-
-(defun handle-updates (bot update-objs)
-  (declare (ignorable bot))
-  (let ((whitelisted-updates (throw-out-bad-updates update-objs)))
-    (format t "~%Handling Updates ~%Valid:~a ~%Recieved:~a"
+(defparameter *chat-id* nil)
+(defparameter *ticks* 0)
+(defun tick (bot update-objects)
+  (incf *ticks*)
+  ;;Remove updates that are not from a whitelisted user
+  (let ((whitelisted-updates (throw-out-bad-updates update-objects)))
+    (format t "~%----Handling Updates---- ~%Valid   :~a ~%Recieved:~a"
 	    (length whitelisted-updates)
-	    (length update-objs))
-    (setf update-objs whitelisted-updates))
-  (dolist (update-obj update-objs)
+	    (length update-objects))
+    (setf update-objects whitelisted-updates))
+  (dolist (update-obj update-objects)
     (print update-obj)
     (let ((update (update-raw-data update-obj)))
       (multiple-value-bind (chatid existsp)
 	  (get-json-object-members* update '("message" "chat"))
-	(print update)
 	;;chatid is the id of the chat the update is from
 	(when existsp
 	  ;;add it to the live chats
 	  (pushnew chatid *live-chats* :test 'equalp)
 	  #+nil
-	  (print
-	   (cl-telegram-bot/bindings::delete-message
-	    bot
-	    (mehfs '("message" "chat" "id")
-		   update)
-	    (mehfs '("message" "message_id")
-		   update)
-	    )))))))
-(defun one-process-iteration (bot)
+	  (cl-telegram-bot/bindings::delete-message
+	   bot
+	   (get-json-object-members* update '("message" "chat" "id"))
+	   (get-json-object-members* update '("message" "message_id"))
+	   )))))
+  
   (cl-telegram-bot::with-locked-bot (bot)
     (while ((let ((thing (next-thing-to-do-time)))
 	      (and (not (eq thing :end))
 		   (>= *current-time* thing))))
-      (print (pop *todo-timeline*))
-      )
-    
-    ;;(print "what" *output*)
+      (destructuring-bind (id todo) (todo-item-value (pop *todo-timeline*))
+	(print id)
+	(typecase todo
+	  (string
+	   (send-message todo :chat-id id)))))
     (when (< 1 (length *live-chats*))
       (error "what the hell? why are there more than one chat?"))
 
     (dolist (chat *live-chats*)
-      (let ((chat-id (get-json-object-member chat "id")))
+      (let ((*chat-id* (get-json-object-member chat "id")))
      ;;;;This part initiates chats
-	(when (zerop (random 100))
-	  (multiple-value-bind (url image) (values "nil" "nil");(test::random-bookmark-?)
-	    (cl-telegram-bot/bindings::send-message
-	     bot
-	     chat-id
-	     (if (string= "" image)
-		 "https://gamepedia.cursecdn.com/minecraft_gamepedia/c/c8/Wolf.png"
-		 image))
-	    (cl-telegram-bot/bindings::send-message
-	     bot
-	     chat-id
-	     url
-	     )))
-	(when (zerop (random 10))
-	  (cl-telegram-bot/bindings::send-message
-	   bot
-	   chat-id
+	(when (zerop (mod *ticks* 8))
+	  (send-message "https://gamepedia.cursecdn.com/minecraft_gamepedia/c/c8/Wolf.png"))
+	(when (zerop (mod *ticks* 4))
+	  (send-message
 	   (with-output-to-string (stream)
-	     (print (random most-positive-fixnum) stream))
+	     (print (utility::etouq (random 234)) stream))
 	   :reply-markup
-	   *testcase*))))
+	   *testcase*))
 
-    (add-task "google.com" (what-time
-			    (local-time:timestamp+ (local-time:now)
-						   (random 100) :sec)))))
+	(add-task (list *chat-id* "google.com")
+		  (what-time
+		   (local-time:timestamp+ (local-time:now)
+					  (random 100) :sec)))))))
+
+(defun send-message (string &rest rest &key &allow-other-keys)
+  (apply 'cl-telegram-bot/bindings::send-message
+	 (or (getf rest :bot) *bot*)
+	 (or (getf rest :chat-id) *chat-id*)
+	 string rest))
 
 
 ;;;whitelisted users
@@ -276,3 +286,6 @@
 
 (defun next-thing-to-do-time ()
   (cdr (first *todo-timeline*)))
+
+(defun todo-item-value (todo-item)
+  (car todo-item))
