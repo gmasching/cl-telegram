@@ -17,6 +17,6 @@
 	       "uncommon-lisp")
   :serial t
   :components
-  ((:file "big")
+  ((:file "bot")
    (:file "bindings")
    (:file "telegram")))

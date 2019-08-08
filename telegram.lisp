@@ -95,7 +95,7 @@
   (jonathan:parse
    (alexandria:read-file-into-string
     (merge-pathnames
-     "json.json"
+     "test/json.json"
      (asdf:system-source-directory :cl-telegram)))
    :as :jsown))
 

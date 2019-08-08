@@ -1,8 +1,8 @@
-(defpackage #:telegram-thing
+(defpackage #:telegram-bindings-generator
   (:use :cl))
-(in-package :telegram-thing)
+(in-package :telegram-bindings-generator)
 
-(defparameter *this-directory* (asdf:system-source-directory :cl-telegram))
+(defparameter *this-directory* (merge-pathnames "test/" (asdf:system-source-directory :cl-telegram)))
 (defparameter *html-file-path*
   (merge-pathnames "Telegram_Bot_API.html"
 		   *this-directory*))
