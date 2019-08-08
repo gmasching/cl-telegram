@@ -10,6 +10,7 @@
 		(alexandria:make-keyword)))
 
 ;;;;Bot
+(defparameter *token* nil)
 (defclass bot ()
   ((lock
     :documentation "Limit access to the bot"
@@ -23,7 +24,7 @@
     :initarg :token
     :documentation "Bot token given by BotFather"
     :accessor token
-    :initform nil)
+    :initform *token*)
    (api-uri
     :initarg  :api-uri
     :initform "https://api.telegram.org/"
@@ -47,15 +48,8 @@
     (format stream
             "id=~A" (get-last-update-id bot))))
 
-(defmacro defbot (name)
-  `(progn
-     (defclass ,name (bot)
-       ())
-
-     (defun ,(alexandria:symbolicate 'make- name) (token)
-       (make-instance ',name
-                      :token token))))
-
+(defun make-bot (&rest rest &key &allow-other-keys)
+  (apply 'make-instance 'bot rest))
 
 (defmethod initialize-instance :after ((bot bot) &key &allow-other-keys)
   (with-accessors ((token         token)
