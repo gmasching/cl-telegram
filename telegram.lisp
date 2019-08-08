@@ -1,58 +1,81 @@
 ;;(ql:quickload :cl-telegram-bot)
 ;;(ql:quickload :utility)
+
+;;;Architecture of the cl-telegram bot
+
+;;;start a spin loop in a subthread which requests updates from Telegram,
+;;;and dispatches on those updates.
 (defpackage #:the-bot
   (:use :cl))
 (in-package #:the-bot)
-(cl-telegram-bot::defbot gun-bot)
 
-(Setf lparallel:*kernel* (lparallel:make-kernel 2))
-(defparameter *channel* (lparallel:make-channel))
+;;blindly coding
+;;planned features:
+;;persistence
+;;multiple users
+;;two-way communication. the bot can alert the person, the person can alert the bot
 
-(defparameter *ticker*
-  (fps-independent-timestep:make-ticker
-   1
-   most-positive-fixnum
-   10))
+;;Initialize the lparallel library
+(setf lparallel:*kernel* (lparallel:make-kernel 2))
+;;The lparallel channel which executes tasks
+(defparameter *channel* nil)
 
-(defparameter *previous-time* 0)
+;;Initialize the device which runs functions at a constant rate in real-time
+(defparameter *ticker* nil)
+
 (defparameter *current-time* 0)
 (defun what-time (&optional (time (local-time:now)))
   (local-time:timestamp-to-unix time))
 
-(defparameter  *stop* t)
-;;(one-process-iteration bot)
-(defun start (token &optional user)
-  (when user
-    (whitelist-user user))
+(defun subthread (fun)
+  "Run a function in a sub-thread"
+  (bt:make-thread fun))
+
+(defun start2 (&optional (token cl-telegram-bot::*token*))
+  (subthread
+   (lambda ()
+     (start token))))
+
+(defparameter *stop* t
+  "Set this to t to stop the program.")
+
+(defparameter *bot* nil)
+(defun start (&optional (token cl-telegram-bot::*token*))
   (setf *stop* nil)
-  (let ((bot (make-gun-bot token)))
-    (let ((submitted 0))
-      ;;FIXME::this is here to empty lost time. Bug?
-      (fps-independent-timestep::tick *ticker* ((what-time)))
-      (loop
-	 (setf *previous-time* *current-time*)
-	 (setf *current-time* (what-time))
-	 (fps-independent-timestep::tick *ticker* (*current-time*)
-	   (one-process-iteration bot))
-	 (multiple-value-bind (value existsp)
-	     (lparallel:try-receive-result *channel*)
-	   
-	   (when existsp
-	     (decf submitted)
-	     (when value
-	       (handle-updates bot value)))
-	   (when (zerop submitted)
-	     (incf submitted)
-	     (lparallel:submit-task
-	      *channel*
-	      (lambda ()
-		(mapcar 'create-update
-			(cl-telegram-bot::get-updates bot
-						      :timeout 10))))))
-	 (when *stop* (return))))))
+  (let ((*bot* (cl-telegram-bot::make-bot :token token))
+	(*channel* (lparallel:make-channel))
+	(*ticker*	 
+	 (fps-independent-timestep:make-ticker
+	  1
+	  most-positive-fixnum
+	  10)))
+    ;;FIXME::this is here to empty lost time. Bug?
+    (fps-independent-timestep::tick *ticker* ((what-time)))
+    (loop
+       (iteration *bot* *channel* *ticker*)
+       (when *stop* (return)))))
+(defun iteration (&optional (bot *bot*) (channel *channel*) (ticker *ticker*))
+  (setf *current-time* (what-time))
+    ;;Run 'one-process-iteration' at a fixed rate.
+  (fps-independent-timestep::tick ticker (*current-time*)
+    (one-process-iteration bot))
+  (multiple-value-bind (value existsp) (lparallel:try-receive-result channel)
+    (when (and existsp value)
+      (handle-updates bot value)
+      (submit-get-updates-task))))
+
+(defun submit-get-updates-task (&optional (bot *bot*) (channel *channel*))
+  "Create a task to asynchronously wait for updates from telegram, apart from the
+  main bot thread."
+  (lparallel:submit-task
+   channel
+   (lambda ()
+     (mapcar 'create-update
+	     (cl-telegram-bot::get-updates bot
+					   :timeout 10)))))
+
 (defun stop ()
   (setf *stop* t))
-
 
 (progn
   (defun mehf (item object)
@@ -118,7 +141,12 @@
 (defparameter *chat-id* nil)
 
 (defun handle-updates (bot update-objs)
-  (setf update-objs (throw-out-bad-updates update-objs))
+  (declare (ignorable bot))
+  (let ((whitelisted-updates (throw-out-bad-updates update-objs)))
+    (format t "~%Handling Updates ~%Valid:~a ~%Recieved:~a"
+	    (length whitelisted-updates)
+	    (length update-objs))
+    (setf update-objs whitelisted-updates))
   (dolist (update-obj update-objs)
     (print update-obj)
     (let ((update (update-raw-data update-obj)))
@@ -180,16 +208,14 @@
 	(cl-telegram-bot/bindings::send-message
 	 bot
 	 *chat-id*
-	 "what"
+	 (with-output-to-string (stream)
+	   (print (random most-positive-fixnum) stream))
 	 :reply-markup
 	 *testcase*)))
 
     (add-task "google.com" (what-time
 		   (local-time:timestamp+ (local-time:now)
-					  (random 100) :sec)))
-    
-     ;;;;This part responds to updates
-    (print 3434)))
+					  (random 100) :sec)))))
 
 (struct-to-clos:struct->class
  (defstruct update
@@ -246,6 +272,9 @@
 ;;;separation of polling and sending
 
 ;;FIXME::O(N) because it uses a list, gets really slow, quadratically?
+;;This is an implementation of a simple scheduler. Tasks are scheduled at
+;;some point in the future. The variable which holds these tasks is the
+;;variable *todo-timeline*.
 (progn
   (defparameter *todo-timeline* (list
 				 (cons "end" :end)))
