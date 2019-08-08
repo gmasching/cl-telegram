@@ -96,7 +96,7 @@
 	    
 	    `(defun ,func-name (,bot-var ,@mandatory-args
 				,@(when optional-args-keywords
-				    `(&key ,@optional-args-keywords)))
+				    `(&key ,@optional-args-keywords &allow-other-keys)))
 	       ,(translate-to-telegram-api-doc name)
 	       (let (,opts-var)
 		 (flet ((add-thing (key value)
