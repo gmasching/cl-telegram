@@ -185,26 +185,39 @@ come first in the queue, and also first in the list."
 		   (user-whitelisted-p (update-user update)))
 		   updates))
 
-(defparameter *live-chats* nil)
+(struct-to-clos:struct->class
+ (defstruct ))
+
+
+(defparameter *live-chats* (make-hash-table))
 (defparameter *chat-id* nil)
 (defparameter *ticks* 0)
 (defun tick (bot update-objects)
   (incf *ticks*)
+  (format t ".")
   ;;Remove updates that are not from a whitelisted user
   (let ((whitelisted-updates (throw-out-bad-updates update-objects)))
-    (format t "~%----Handling Updates---- ~%Valid   :~a ~%Recieved:~a"
-	    (length whitelisted-updates)
-	    (length update-objects))
+    (let ((whitelisted-updates-count (length whitelisted-updates))
+	  (update-objects-count (length update-objects)))
+      (unless (zerop update-objects-count)
+	(format t "~%----Handling Updates----")
+	(format t "~%Valid   :~a ~%Recieved:~a"
+		whitelisted-updates-count
+		update-objects-count)))
     (setf update-objects whitelisted-updates))
   (dolist (update-obj update-objects)
     (print update-obj)
+    (print (get-json-object-member (update-thing update-obj) "text"))
     (let ((update (update-raw-data update-obj)))
       (multiple-value-bind (chatid existsp)
 	  (get-json-object-members* update '("message" "chat"))
 	;;chatid is the id of the chat the update is from
+	;;FIXME::doees this belong here? only adding to live chats once the
+	;;user texts the bot first?
 	(when existsp
 	  ;;add it to the live chats
-	  (pushnew chatid *live-chats* :test 'equalp)
+	  (setf (gethash chatid *live-chats*) t)
+	  ;;FIXME::chat deletion code... move somewhere else?
 	  #+nil
 	  (cl-telegram-bot/bindings::delete-message
 	   bot
@@ -226,26 +239,29 @@ come first in the queue, and also first in the list."
 
     (dolist (chat *live-chats*)
       (let ((*chat-id* (get-json-object-member chat "id")))
-     ;;;;This part initiates chats
+	#+nil
+	(send-message *ticks*)
+	#+nil
 	(when (zerop (mod *ticks* 8))
 	  (send-message "https://gamepedia.cursecdn.com/minecraft_gamepedia/c/c8/Wolf.png"))
+	#+nil
 	(when (zerop (mod *ticks* 4))
 	  (send-message
 	   (with-output-to-string (stream)
 	     (print (utility::etouq (random 234)) stream))
 	   :reply-markup
 	   *testcase*))
-
+	#+nil
 	(add-task (list *chat-id* "google.com")
 		  (what-time
 		   (local-time:timestamp+ (local-time:now)
 					  (random 100) :sec)))))))
 
-(defun send-message (string &rest rest &key &allow-other-keys)
+(defun send-message (thing &rest rest &key &allow-other-keys)
   (apply 'cl-telegram-bot/bindings::send-message
 	 (or (getf rest :bot) *bot*)
 	 (or (getf rest :chat-id) *chat-id*)
-	 string rest))
+	 (format nil "~a" thing) rest))
 
 
 ;;;whitelisted users
